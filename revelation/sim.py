@@ -1,6 +1,6 @@
 from pydgin.debug import Debug, pad, pad_hex
 from pydgin.elf import elf_reader
-from pydgin.jit import elidable, hint, JitDriver, set_param, set_user_param
+from pydgin.jit import JitDriver, set_param, set_user_param
 from pydgin.sim import Sim, init_sim
 
 from revelation.argument_parser import cli_parser, DoNotInterpretError
@@ -10,7 +10,7 @@ from revelation.isa import decode
 from revelation.logger import Logger
 from revelation.machine import State
 from revelation.registers import reg_map
-from revelation.storage import Memory
+from revelation.storage import MemoryFactory
 from revelation.utils import format_thousands, get_coords_from_coreid
 from revelation.utils import  get_coreid_from_coords, zfill
 
@@ -27,13 +27,13 @@ LOG_FILENAME = 'r_trace.out'
 
 
 def new_memory(logger):
-    return Memory(block_size=2**20, logger=logger)
+    return MemoryFactory(block_size=2**20, logger=logger)
 
 
-def get_printable_location(pc, core, coreid, opcode):
+def get_printable_location(pc, _, coreid, opcode, halted, idle):
     hex_pc = pad_hex(pc)
     mnemonic, _ = decode(opcode)
-    return 'Core ID: 0x%x PC: %s Instruction: %s' % (coreid, hex_pc, mnemonic)
+    return 'Core index: 0x%x PC: %s Instruction: %s' % (coreid, hex_pc, mnemonic)
 
 
 class Revelation(Sim):
@@ -47,24 +47,25 @@ class Revelation(Sim):
         self.jit_enabled = True
         if self.jit_enabled:
             self.jitdriver = JitDriver(
-                greens = ['pc', 'core', 'coreid', 'opcode'],
-                reds = ['tick_counter', 'old_pc', 'halted_cores', 'idle_cores',
-                        'memory', 'sim', 'state', 'start_time'],
-                virtualizables = ['state'],
+                greens=['pc', 'core', 'coreid', 'opcode', 'halted_cores', 'idle_cores',],
+                reds=['tick_counter', 'max_insts',
+                      'memory', 'sim', 'state',
+                      'start_time'],
                 get_printable_location=get_printable_location)
         self.default_trace_limit = 400000
         self.max_insts = 0
         self.logger = None
-        self.core = 0    # Index of current core (moved after each instruction).
+        self.core = 0  # Index of current core (moved after each instruction).
         self.rows = 1
         self.cols = 1
         self.first_core = 0x808
-        self.ext_base = 0x8e000000
+        self.ext_base = 0x8e000000  # Base address of 'external' memory.
         self.ext_size = 32  # MB.
         self.switch_interval = 1       # TODO: currently ignored.
         self.user_environment = False  # TODO: currently ignored.
         self.collect_times = False
-        self.states = []
+        self.profile = False  # Collect timing data BEFORE main loop.
+        self.states = []  # Cores (revelation.machine.State objects).
         self.hardware_loops = []
         self.ivt = {  # Interrupt vector table.
             0 : 0x0,  # Sync hardware signal.
@@ -79,7 +80,6 @@ class Revelation(Sim):
             9 : 0x24, # Software-generate user interrupt.
         }
 
-    @elidable
     def next_core(self, core):
         return (core + 1) % (self.rows * self.cols)
 
@@ -123,14 +123,14 @@ class Revelation(Sim):
         return entry_point
 
     def decode(self, bits):
-        mnemonic, exec_fun = decode(bits)
+        mnemonic, function = decode(bits)
         if (self.debug.enabled('trace') and self.logger and
               self.states[self.core].is_first_core):
             self.logger.log('%s %s %s %s' %
                (pad('%x' % self.states[self.core].fetch_pc(), 8, ' ', False),
                 pad_hex(bits), pad(mnemonic, 12),
                 pad('%d' % self.states[self.core].num_insts, 8)))
-        return Instruction(bits, mnemonic), exec_fun
+        return Instruction(bits, mnemonic), function
 
     def pre_execute(self):
         # Check whether or not we are in a hardware loop, and set registers
@@ -193,37 +193,35 @@ class Revelation(Sim):
         """Fetch, decode, execute, service interrupts loop.
         Override Sim.run to provide multicore and close the logger on exit.
         """
-        self = hint(self, promote=True)
-        memory = hint(self.memory, promote=True)  # Cores share the same memory.
         coreid = 0     # We save these values so that get_location can print
         opcode = 0     # a more meaningful trace in the JIT log.
         tick_counter = 0  # Number of instructions executed by all cores.
         halted_cores, idle_cores = [], []
-        old_pc = 0
+        pc = self.states[self.core].fetch_pc()
         start_time, end_time = time.time(), .0
 
-        while True:
+        while len(halted_cores) != len(self.states):
             self.jitdriver.jit_merge_point(pc=self.states[self.core].fetch_pc(),
                                            core=self.core,
                                            coreid=coreid,
                                            opcode=opcode,
                                            tick_counter=tick_counter,
-                                           old_pc=old_pc,
+                                           max_insts=self.max_insts,
                                            halted_cores=halted_cores,
                                            idle_cores=idle_cores,
-                                           memory=memory,
+                                           memory=self.memory,
                                            sim=self,
                                            state=self.states[self.core],
                                            start_time=start_time)
             # Fetch PC, decode instruction and execute.
-            pc = hint(self.states[self.core].fetch_pc(), promote=True)
-            coreid = hint(self.states[self.core].coreid, promote=True)
-            old_pc = pc
-            opcode = memory.iread(pc, 4, from_core=self.states[self.core].coreid)
+            pc = self.states[self.core].fetch_pc()
+            self.states[self.core].fetch_pc()
+            coreid = self.states[self.core].coreid
+            opcode = self.memory.iread(pc, 4, from_core=self.states[self.core].coreid)
             try:
-                instruction, exec_fun = self.decode(opcode)
+                instruction, function = self.decode(opcode)
                 self.pre_execute()
-                exec_fun(self.states[self.core], instruction)
+                function(self.states[self.core], instruction)
                 self.post_execute()
             except (FatalError, NotImplementedInstError) as error:
                 mnemonic, _ = decode(opcode)
@@ -231,7 +229,7 @@ class Revelation(Sim):
                        (mnemonic, pad_hex(pc)))
                 print 'Exception message: %s' % error.msg
                 # Ensure that entry_point() returns correct exit code.
-                return EXIT_GENERAL_ERROR   # pragma: no cover
+                return EXIT_GENERAL_ERROR  # pragma: no cover
             # Update instruction counters.
             tick_counter += 1
             self.states[self.core].num_insts += 1
@@ -249,26 +247,14 @@ class Revelation(Sim):
             # Switch cores after every instruction. TODO: Switch interval.
             if tick_counter % self.switch_interval == 0 and len(self.states) > 1:
                 while True:
-                    self.core = hint(self.next_core(self.core), promote=True)
+                    self.core = self.next_core(self.core)
                     if not (self.core in halted_cores or self.core in idle_cores):
                         break
                     # Idle cores can be reactivated by interrupts.
                     elif (self.core in idle_cores and self.fetch_latch() > 0):
                         idle_cores.remove(self.core)
                         self._service_interrupts()
-            if self.states[self.core].fetch_pc() < old_pc:
-                self.jitdriver.can_enter_jit(pc=self.states[self.core].fetch_pc(),
-                                             core=self.core,
-                                             coreid=coreid,
-                                             opcode=opcode,
-                                             tick_counter=tick_counter,
-                                             old_pc=old_pc,
-                                             halted_cores=halted_cores,
-                                             idle_cores=idle_cores,
-                                             memory=memory,
-                                             sim=self,
-                                             state=self.states[self.core],
-                                             start_time=start_time)
+                    coreid = self.states[self.core].coreid
         # End of fetch-decode-execute-service interrupts loop.
         if self.collect_times:
             end_time = time.time()
