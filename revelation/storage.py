@@ -1,5 +1,5 @@
 from pydgin.debug import Debug, pad, pad_hex
-from pydgin.jit import elidable, unroll_safe, hint
+from pydgin.utils import specialize
 
 from revelation.registers import reg_memory_map
 
@@ -15,6 +15,7 @@ def is_register_address(address):
 class _BlockMemory(object):
     """32MB block of memory, initialised to zero.
     """
+    _immutable_fields_ = ['size']
 
     def __init__(self, size=2**10, logger=None):
         """Initialise all memory to zero, as we don't know which memory.
@@ -23,7 +24,6 @@ class _BlockMemory(object):
         self.data = ['\0'] * size
         self.size = len(self.data)
 
-    @unroll_safe
     def read(self, start_addr, num_bytes):
         value = 0
         for i in range(num_bytes - 1, -1, -1):
@@ -31,7 +31,6 @@ class _BlockMemory(object):
             value = value | ord(self.data[start_addr + i])
         return value
 
-    @elidable
     def iread(self, start_addr, num_bytes):
         """This is instruction read, which is otherwise identical to read. The
         only difference is the elidable annotation, which we assume the
@@ -44,7 +43,6 @@ class _BlockMemory(object):
             value = value | ord(self.data[start_addr + i])
         return value
 
-    @unroll_safe
     def write(self, start_addr, num_bytes, value, from_core=0x808):
         for i in range(num_bytes):
             self.data[start_addr + i] = chr(value & 0xff)
@@ -68,19 +66,15 @@ class Memory(object):
     def add_block(self, block_addr):
         self.block_dict[block_addr] = _BlockMemory(size=self.block_size)
 
-    @elidable
     def get_block_mem(self, block_addr):
         if block_addr not in self.block_dict:
             self.add_block(block_addr)
         block_mem = self.block_dict[block_addr]
         return block_mem
 
-    @elidable
     def iread(self, start_addr, num_bytes, from_core=0x808):
         if is_local_address(start_addr):
             start_addr |= (from_core << 20)
-        start_addr = hint(start_addr, promote=True)
-        num_bytes  = hint(num_bytes,  promote=True)
         end_addr   = start_addr + num_bytes - 1
         block_addr = self.block_mask & start_addr
         block_mem = self.get_block_mem(block_addr)
@@ -106,7 +100,6 @@ class Memory(object):
         if is_local_address(start_addr):
             start_addr |= (from_core << 20)
         block_addr = self.block_mask & start_addr
-        block_addr = hint(block_addr, promote=True)
         block_mem = self.get_block_mem(block_addr)
         masked_addr = 0xfffff & start_addr
         value = block_mem.read(start_addr & self.addr_mask, num_bytes)
@@ -149,7 +142,6 @@ class Memory(object):
             ilat |= 0x10
             self.write(coreid_mask | 0xf0428, 4, ilat)
         block_addr = self.block_mask & start_addr
-        block_addr = hint(block_addr, promote=True)
         block_mem = self.get_block_mem(block_addr)
         block_mem.write(start_addr & self.addr_mask, num_bytes, value)
         masked_addr = 0xfffff & start_addr
@@ -190,6 +182,7 @@ class MemoryMappedRegisterFile(object):
                               pad_hex(value, len=self.debug_nchars)))
         return value
 
+    @specialize.argtype(2)
     def __setitem__(self, index, value):
         if index == 0x65:  # COREID register. Read only. Other Read/Write only
             return         # registers need to be accessed by instructions.
