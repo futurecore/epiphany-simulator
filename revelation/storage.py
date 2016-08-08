@@ -22,7 +22,6 @@ def MemoryFactory(data=None, block_size=2**20, logger=None):
     if not sparse_storage:
         return _RevelationByteMemory(data, 2**32, logger)
     else:
-        print "NOTE: Using sparse storage"
         return _SparseMemory(logger=logger)
 
 
