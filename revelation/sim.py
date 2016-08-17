@@ -5,6 +5,7 @@ from pydgin.sim import Sim, init_sim
 
 from revelation.argument_parser import cli_parser, DoNotInterpretError
 from revelation.elf_loader import load_program
+from revelation.gdb.gdb import RSPServer
 from revelation.instruction import Instruction
 from revelation.isa import decode
 from revelation.logger import Logger
@@ -111,6 +112,7 @@ class Revelation(Sim):
                         'state',],
                 get_printable_location=get_printable_location)
         self.default_trace_limit = 400000
+        self.run_from_gdb = False
         self.max_insts = 0             # --max-insts.
         self.logger = None             # --debug output: self.logger.log().
         self.rows = 1                  # --rows, -r.
@@ -145,24 +147,34 @@ class Revelation(Sim):
             if jit:  # pragma: no cover
                 set_user_param(self.jitdriver, jit)
             self.debug = Debug(flags, 0)
-            try:
-                elf_file = open(fname, 'rb')
-            except IOError:
-                print 'Could not open file %s' % fname
-                return EXIT_FILE_ERROR
+            if fname:  # --gdb, -g may not pass back a file name.
+                try:
+                    elf_file = open(fname, 'rb')
+                except IOError:
+                    print 'Could not open file %s' % fname
+                    return EXIT_FILE_ERROR
+                self.init_state(elf_file, fname, False)
+                for state in self.states:
+                    self.debug.set_state(state)
+                elf_file.close()
             if self.profile:
                 timer = time.time()
                 print 'CLI parser took: %fs' % (timer - self.timer)
                 self.timer = timer
-            self.init_state(elf_file, fname, False)
-            for state in self.states:
-                self.debug.set_state(state)
-            elf_file.close()
-            try:
-                exit_code, tick_counter = self.run()
-            except KeyboardInterrupt:
-                exit_code = EXIT_CTRL_C
+            if self.run_from_gdb:
+                # If the user is controlling Revelation from GDB, we bypass
+                # self.init_state() and self.run() and let the RSP server
+                # initialise the simulator and load any necessary ELF files.
+                gdb_server = RSPServer(self)
+                gdb_server.start()
+                exit_code = EXIT_SUCCESS
                 tick_counter = -1
+            else:
+                try:
+                    exit_code, tick_counter = self.run()
+                except KeyboardInterrupt:
+                    exit_code = EXIT_CTRL_C
+                    tick_counter = -1
             if self.collect_times:
                 self.end_time = time.time()
             if self.logger:

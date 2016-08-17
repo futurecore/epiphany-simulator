@@ -65,6 +65,7 @@ The full list of command-line options is:
         --time, -t               Print approximate timing information
         --jit FLAGS              Set flags to tune the JIT (see
                                      rpython.rlib.jit.PARAMETER_DOCS)
+        --gdb, -g               Wait for input on start (e.g. when running via gdb).
         --debug,-d FLAGS        Enable debug flags in a comma-separated form. The
                                 following flags are supported:
                                      trace     pc, decoded instructions
@@ -136,6 +137,7 @@ There are a small number of unimplemented features in Revelation:
 - Work-groups and loading more than one binary
 - The ``DEBUGSTATUS`` and ``DEBUGCMD`` registers (you can read and write to these but they don't have any special effects)
 - The ``MESHCONFIG`` registers (you can read and write to these but they don't have any special effects)
+- The ``MEMPROTECT`` register (you can read and write to this but it doesn't have any special effect)
 - Event timers other than IALU and FPU valid instructions
 
 

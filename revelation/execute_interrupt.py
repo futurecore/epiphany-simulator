@@ -26,7 +26,9 @@ def execute_bkpt16(s, inst):
     GDB and should not be user software. The instruction is included here
     only for the purpose of reference.
     """
-    raise NotImplementedInstError('bkpt instruction not implemented.')
+    s.rf[reg_map['DEBUGSTATUS']] |= 1
+    s.pc += 2
+    s.ACTIVE = False
 
 
 def execute_mbkpt16(s, inst):
@@ -190,7 +192,7 @@ def execute_wand16(s, inst):
     raise NotImplementedInstError('wand instruction not implemented.')
 
 
-def execute_unimpl(s, inst):
+def execute_unimpl32(s, inst):
     """Not implemented exception.
     STATUS[16-19] = 0100  [Epiphany III]
     STATUS[16-19] = 1111  [Epiphany IV]
